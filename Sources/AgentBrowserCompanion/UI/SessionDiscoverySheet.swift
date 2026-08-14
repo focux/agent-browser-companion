@@ -18,6 +18,7 @@ struct SessionDiscoverySheet: View {
     @State private var isAdding = false
     @State private var errorMessage: String?
     @State private var hasSearched = false
+    @State private var discoveryResults: [DiscoveryResult] = []
     @State private var discoveryTask: Task<Void, Never>?
 
     var body: some View {
@@ -78,6 +79,7 @@ struct SessionDiscoverySheet: View {
             selectedSessionIDs = []
             errorMessage = nil
             hasSearched = false
+            discoveryResults = []
             if location == .known { discover() }
         }
         .onDisappear { discoveryTask?.cancel() }
@@ -85,18 +87,39 @@ struct SessionDiscoverySheet: View {
 
     @ViewBuilder
     private var browserSessionSections: some View {
-        if shouldGroupSessionsByHost, !sessions.isEmpty, !isDiscovering {
-            ForEach(groupedSessions, id: \.hostname) { group in
-                Section(group.hostname) {
-                    ForEach(group.sessions) { session in
-                        discoveredRow(session)
-                    }
+        if shouldGroupSessionsByHost, !isDiscovering {
+            ForEach(discoveryTargets, id: \.self) { target in
+                Section(target.displayHost) {
+                    discoveryResultContent(for: target)
                 }
             }
         } else {
             Section("Browser Sessions") {
                 browserSessionSectionContent
             }
+        }
+    }
+
+    @ViewBuilder
+    private func discoveryResultContent(for target: AgentBrowserDiscoveryTarget) -> some View {
+        if let result = discoveryResults.first(where: { $0.target == target }) {
+            if !result.sessions.isEmpty {
+                ForEach(result.sessions) { session in
+                    discoveredRow(session)
+                }
+            } else if let error = result.error {
+                compactState(
+                    "Host Unavailable",
+                    systemImage: "exclamationmark.triangle",
+                    description: error
+                )
+            } else {
+                Text("No active Agent Browser sessions.")
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Text("No active Agent Browser sessions.")
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -178,12 +201,6 @@ struct SessionDiscoverySheet: View {
         location == .known && discoveryTargets.count > 1
     }
 
-    private var groupedSessions: [(hostname: String, sessions: [DiscoveredAgentBrowserSession])] {
-        Dictionary(grouping: sessions, by: { $0.source.displayHost })
-            .map { (hostname: $0.key, sessions: $0.value) }
-            .sorted { $0.hostname.localizedCaseInsensitiveCompare($1.hostname) == .orderedAscending }
-    }
-
     private var selectedSessions: [DiscoveredAgentBrowserSession] {
         sessions.filter { selectedSessionIDs.contains($0.id) && !workspace.isDiscoveredSessionAdded($0) }
     }
@@ -254,6 +271,7 @@ struct SessionDiscoverySheet: View {
         discoveryTask?.cancel()
         isDiscovering = true
         errorMessage = nil
+        discoveryResults = []
         selectedSessionIDs = []
         let targets = discoveryTargets
 
@@ -283,6 +301,9 @@ struct SessionDiscoverySheet: View {
             }
 
             guard !Task.isCancelled else { return }
+            discoveryResults = results.sorted {
+                $0.target.displayHost.localizedCaseInsensitiveCompare($1.target.displayHost) == .orderedAscending
+            }
             let discovered = results.flatMap(\.sessions)
             sessions = discovered.sorted {
                 if $0.source.displayHost != $1.source.displayHost {

@@ -2,6 +2,92 @@ import XCTest
 @testable import AgentBrowserCompanion
 
 final class DiscoveryTests: XCTestCase {
+    func testKnownDiscoveryTargetsAlwaysIncludesLocal() {
+        XCTAssertEqual(DiscoveryTargetCatalog.knownTargets(from: []), [.local])
+    }
+
+    func testLocalCommandEnvironmentFindsAgentBrowserInstalledByNVM() throws {
+        let homeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let nvmBinDirectory = homeDirectory
+            .appendingPathComponent(".nvm/versions/node/v22.16.0/bin", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: nvmBinDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: homeDirectory) }
+
+        let agentBrowser = nvmBinDirectory.appendingPathComponent("agent-browser")
+        XCTAssertTrue(FileManager.default.createFile(atPath: agentBrowser.path, contents: Data()))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: agentBrowser.path
+        )
+
+        let environment = AgentBrowserCommandEnvironment.local(
+            base: ["PATH": "/usr/bin:/bin"],
+            homeDirectory: homeDirectory
+        )
+
+        let firstSearchDirectory = try XCTUnwrap(
+            environment["PATH"]?.split(separator: ":").first.map(String.init)
+        )
+        XCTAssertEqual(
+            URL(fileURLWithPath: firstSearchDirectory).resolvingSymlinksInPath(),
+            nvmBinDirectory.resolvingSymlinksInPath()
+        )
+    }
+
+    func testLocalCommandEnvironmentFindsCommonUserPackageManagerInstalls() throws {
+        let installationDirectories = [
+            ".cargo/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".npm-global/bin",
+            ".yarn/bin",
+            ".config/yarn/global/node_modules/.bin",
+            "Library/pnpm",
+            ".asdf/shims",
+            ".local/share/mise/shims",
+            ".local/share/fnm/node-versions/v22.16.0/installation/bin",
+            ".nix-profile/bin",
+        ]
+
+        for relativeDirectory in installationDirectories {
+            let homeDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let binDirectory = homeDirectory
+                .appendingPathComponent(relativeDirectory, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: binDirectory,
+                withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: homeDirectory) }
+
+            let agentBrowser = binDirectory.appendingPathComponent("agent-browser")
+            XCTAssertTrue(
+                FileManager.default.createFile(atPath: agentBrowser.path, contents: Data())
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: agentBrowser.path
+            )
+
+            let environment = AgentBrowserCommandEnvironment.local(
+                base: ["PATH": "/usr/bin:/bin"],
+                homeDirectory: homeDirectory
+            )
+            let firstSearchDirectory = try XCTUnwrap(
+                environment["PATH"]?.split(separator: ":").first.map(String.init)
+            )
+            XCTAssertEqual(
+                URL(fileURLWithPath: firstSearchDirectory).resolvingSymlinksInPath(),
+                binDirectory.resolvingSymlinksInPath(),
+                "Failed to resolve an Agent Browser installation in \(relativeDirectory)"
+            )
+        }
+    }
+
     func testSSHSourceUsesRemoteHostAndPortForSidebarMetadata() {
         let source = AgentBrowserSource.ssh(
             host: "developer@browser-host",

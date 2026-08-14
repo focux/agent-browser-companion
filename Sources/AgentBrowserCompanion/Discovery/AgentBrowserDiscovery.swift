@@ -112,6 +112,122 @@ enum DiscoveryTargetCatalog {
     }
 }
 
+enum AgentBrowserCommandEnvironment {
+    static let current = local()
+
+    static func local(
+        base: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> [String: String] {
+        let existingPath = base["PATH", default: ""]
+            .split(separator: ":", omittingEmptySubsequences: true)
+            .map(String.init)
+        if existingPath.contains(where: {
+            let executable = URL(fileURLWithPath: $0)
+                .appendingPathComponent("agent-browser")
+            return fileManager.isExecutableFile(atPath: executable.path)
+        }) {
+            return base
+        }
+
+        let environmentCandidates = [
+            base["NVM_BIN"],
+            base["PNPM_HOME"],
+            base["VOLTA_HOME"].map {
+                URL(fileURLWithPath: $0).appendingPathComponent("bin").path
+            },
+            base["CARGO_HOME"].map {
+                URL(fileURLWithPath: $0).appendingPathComponent("bin").path
+            },
+            base["BUN_INSTALL"].map {
+                URL(fileURLWithPath: $0).appendingPathComponent("bin").path
+            },
+        ]
+        .compactMap { $0 }
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
+
+        let homeCandidates = [
+            "bin",
+            ".local/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".cargo/bin",
+            ".npm-global/bin",
+            ".yarn/bin",
+            ".config/yarn/global/node_modules/.bin",
+            "Library/pnpm",
+            ".asdf/shims",
+            ".local/share/mise/shims",
+            ".local/share/fnm/aliases/default/bin",
+            ".nix-profile/bin",
+        ].map { homeDirectory.appendingPathComponent($0, isDirectory: true) }
+
+        let nvmVersionsDirectory = homeDirectory
+            .appendingPathComponent(".nvm/versions/node", isDirectory: true)
+        let nvmCandidates = versionedDirectories(
+            in: nvmVersionsDirectory,
+            appending: "bin",
+            fileManager: fileManager
+        )
+
+        let fnmVersionsDirectory = homeDirectory
+            .appendingPathComponent(".local/share/fnm/node-versions", isDirectory: true)
+        let fnmCandidates = versionedDirectories(
+            in: fnmVersionsDirectory,
+            appending: "installation/bin",
+            fileManager: fileManager
+        )
+
+        let systemCandidates = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/opt/local/bin",
+            "/nix/var/nix/profiles/default/bin",
+        ]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let candidates = environmentCandidates
+            + homeCandidates
+            + nvmCandidates
+            + fnmCandidates
+            + systemCandidates
+        guard let agentBrowserDirectory = candidates.first(where: {
+            fileManager.isExecutableFile(
+                atPath: $0.appendingPathComponent("agent-browser").path
+            )
+        }) else {
+            return base
+        }
+
+        var environment = base
+        environment["PATH"] = ([agentBrowserDirectory.path] + existingPath)
+            .reduce(into: [String]()) { paths, path in
+                if !paths.contains(path) { paths.append(path) }
+            }
+            .joined(separator: ":")
+        return environment
+    }
+
+    private static func versionedDirectories(
+        in directory: URL,
+        appending relativePath: String,
+        fileManager: FileManager
+    ) -> [URL] {
+        ((try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? [])
+        .sorted {
+            $0.lastPathComponent.compare(
+                $1.lastPathComponent,
+                options: [.caseInsensitive, .numeric]
+            ) == .orderedDescending
+        }
+        .map { $0.appendingPathComponent(relativePath, isDirectory: true) }
+    }
+}
+
 enum AgentBrowserDiscoveryError: LocalizedError {
     case invalidSSHHost
     case commandFailed(String)
@@ -363,8 +479,9 @@ struct AgentBrowserDiscoveryService {
         switch target {
         case .local:
             return try ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/bin/zsh"),
-                arguments: ["-lc", command]
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", command],
+                environment: AgentBrowserCommandEnvironment.current
             )
         case .ssh(let rawHost):
             let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -607,12 +724,17 @@ final class SSHTunnelManager {
 }
 
 private enum ProcessRunner {
-    static func run(executable: URL, arguments: [String]) throws -> String {
+    static func run(
+        executable: URL,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) throws -> String {
         let process = Process()
         let standardOutput = Pipe()
         let standardError = Pipe()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = environment
         process.standardOutput = standardOutput
         process.standardError = standardError
 
