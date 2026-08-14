@@ -117,64 +117,6 @@ swift test
 
 The packaging script verifies that Swift stamped the executable with the active macOS SDK, copies the icon and metadata, and signs local development bundles ad hoc. Set `CODE_SIGN_IDENTITY` to use an installed signing identity instead.
 
-## Releases
-
-Pushing a semantic-version tag runs the release workflow:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions then:
-
-1. runs the complete test suite on GitHub's Xcode 27 preview image;
-2. imports the Developer ID certificate into a temporary Keychain;
-3. builds the app with Hardened Runtime, a secure timestamp, and the version from the tag;
-4. submits the app to Apple's notary service and staples the accepted ticket;
-5. validates the app with Gatekeeper;
-6. creates a versioned ZIP archive and SHA-256 checksum;
-7. publishes both files to a GitHub Release with generated release notes;
-8. removes all signing material from the runner.
-
-The release job intentionally uses GitHub's `xcode-27` preview image so its compiler and SDK match the environment used to develop and visually verify the app. Preview runner images can change more frequently and are not covered by GitHub's standard Actions SLA.
-
-### Configure release signing
-
-Before pushing the first release tag, add these encrypted repository secrets under **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-| --- | --- |
-| `DEVELOPER_ID_APPLICATION_P12_BASE64` | A base64-encoded `.p12` export of the **Developer ID Application** certificate and its private key |
-| `DEVELOPER_ID_APPLICATION_P12_PASSWORD` | The password chosen when exporting the `.p12` |
-| `APP_STORE_CONNECT_API_KEY_P8_BASE64` | The downloaded App Store Connect API `.p8` key, base64-encoded |
-| `APP_STORE_CONNECT_API_KEY_ID` | The API key ID shown in App Store Connect |
-| `APP_STORE_CONNECT_API_ISSUER_ID` | The issuer UUID for the Team API key |
-
-Export the Developer ID certificate and private key from **Keychain Access → My Certificates**. Create a **Team API key** under **App Store Connect → Users and Access → Integrations**; Individual API keys cannot use Apple's notarization service. Then copy each file as base64 without committing either file:
-
-```bash
-base64 -i DeveloperIDApplication.p12 | pbcopy
-base64 -i AuthKey_KEYID.p8 | pbcopy
-```
-
-The workflow fails before building if a required secret is missing. GitHub exposes the credentials only to the release job, which imports them into a temporary Keychain and deletes the decoded files afterward.
-
-You can reproduce the release archive locally:
-
-```bash
-./Scripts/package-release.sh v0.1.0
-```
-
-That command creates an ad-hoc signed development archive by default. To reproduce the complete notarized release using credentials stored by `notarytool` in your Keychain:
-
-```bash
-CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARIZE=true \
-NOTARYTOOL_KEYCHAIN_PROFILE="agent-browser-companion" \
-./Scripts/package-release.sh v0.1.0
-```
-
 ## License
 
 Agent Browser Companion is available under the [MIT License](LICENSE).
