@@ -23,7 +23,11 @@
 </p>
 
 <p align="center">
-  <img src="Media/AgentBrowserCompanion-Hero.png" width="1200" alt="Agent Browser Companion showing a live remote browser session">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Media/AgentBrowserCompanion-Hero-Dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="Media/AgentBrowserCompanion-Hero.png">
+    <img src="Media/AgentBrowserCompanion-Hero.png" width="1200" alt="Agent Browser Companion showing a live remote browser session">
+  </picture>
 </p>
 
 Agent Browser Companion is a fully native SwiftUI app for observing browser sessions operated by AI agents in cloud machines, development sandboxes, and remote servers. It gives you a live view of what the agent is doing without requiring you to keep the browser on your own Mac.
