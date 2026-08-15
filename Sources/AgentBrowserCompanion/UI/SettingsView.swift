@@ -20,7 +20,7 @@ struct SettingsView: View {
             }
 
             Section {
-                Text("Acknowledgement pacing keeps at most one frame in flight, which prioritizes a fresh preview on remote links.")
+                Text("Acknowledgement delivery keeps at most one frame in flight and skips stale preview frames on remote links.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

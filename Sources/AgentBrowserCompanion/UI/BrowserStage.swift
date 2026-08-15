@@ -67,8 +67,9 @@ struct BrowserStage: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
+                                .frame(maxWidth: 373)
                         }
-                        .frame(maxWidth: 420)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 12)
                         .help(pageURL.absoluteString)
                     }

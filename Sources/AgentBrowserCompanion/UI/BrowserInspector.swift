@@ -95,9 +95,9 @@ private struct InspectorContent: View {
                     Text(latencyLabel)
                         .monospacedDigit()
                 } label: {
-                    Label("Latency", systemImage: "timer")
+                    Label("Stream delay", systemImage: "timer")
                 }
-                .help("WebSocket round-trip time to the Agent Browser stream.")
+                .help("WebSocket round-trip time, including queued preview data. This is not input response time.")
                 LabeledContent {
                     Text(viewportLabel)
                         .monospacedDigit()
@@ -106,37 +106,18 @@ private struct InspectorContent: View {
                 }
             }
 
-            Section("Stream") {
-                if client.supportsClientStreamConfiguration {
+            if client.supportsClientStreamConfiguration {
+                Section("Stream") {
                     LabeledContent {
-                        HStack(spacing: 10) {
-                            Slider(
-                                value: Binding(
-                                    get: { Double(workspace.preferredFPS) },
-                                    set: { workspace.preferredFPS = Int($0.rounded()) }
-                                ),
-                                in: 0...120,
-                                step: 1
-                            )
-                            Text(maximumRateLabel)
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(minWidth: 48, alignment: .trailing)
-                        }
+                        Text(frameRateSummaryLabel)
+                            .monospacedDigit()
                     } label: {
-                        Label("Maximum FPS", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                        Label(
+                            "Frame rate",
+                            systemImage: "gauge.with.dots.needle.bottom.50percent"
+                        )
                     }
-                    Picker("Delivery", selection: $workspace.pacing) {
-                        ForEach(StreamPacing.allCases) { pacing in
-                            Text(pacing.label).tag(pacing)
-                        }
-                    }
-                }
-                if let age = client.frameAge {
-                    LabeledContent("Frame age", value: formatFrameAge(age))
-                }
-                if client.currentFrame != nil, client.isBrowserAvailable {
-                    LabeledContent("Observed", value: observedRateLabel)
+                    .help("The maximum preview frame rate selected in Settings.")
                 }
             }
         }
@@ -154,10 +135,6 @@ private struct InspectorContent: View {
         return milliseconds < 1 ? "<1 ms" : "\(Int(milliseconds.rounded())) ms"
     }
 
-    private func formatFrameAge(_ age: TimeInterval) -> String {
-        return age < 1 ? "\(Int(age * 1_000)) ms" : String(format: "%.1f s", age)
-    }
-
     private var statusColor: Color {
         switch client.connectionState {
         case .connected:
@@ -172,11 +149,9 @@ private struct InspectorContent: View {
         client.effectiveStatusLabel
     }
 
-    private var maximumRateLabel: String {
-        workspace.preferredFPS == 0 ? "Unlimited" : "\(workspace.preferredFPS) fps"
-    }
-
-    private var observedRateLabel: String {
-        client.framesPerSecond < 1 ? "Idle" : "\(Int(client.framesPerSecond)) fps"
+    private var frameRateSummaryLabel: String {
+        return workspace.preferredFPS == 0
+            ? "Unlimited"
+            : "Up to \(workspace.preferredFPS) fps"
     }
 }
