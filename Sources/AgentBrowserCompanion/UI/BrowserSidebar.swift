@@ -22,13 +22,19 @@ struct BrowserSidebar: View {
         .environment(\.defaultMinListHeaderHeight, 18)
         .overlay {
             if workspace.filteredSessions.isEmpty {
-                ContentUnavailableView {
-                    Label(workspace.sessions.isEmpty ? "No Browser Sessions" : "No Results", systemImage: "globe.desk")
-                } description: {
-                    Text(workspace.sessions.isEmpty ? "Discover an active Agent Browser session to watch and control it." : "Try a different search.")
-                } actions: {
-                    if workspace.sessions.isEmpty {
-                        Button("Discover Sessions…") { workspace.isPresentingSessionDiscovery = true }
+                if workspace.sessions.isEmpty, workspace.isDiscoveringSessions {
+                    ProgressView("Finding Browser Sessions…")
+                } else {
+                    ContentUnavailableView {
+                        Label(workspace.sessions.isEmpty ? "No Active Browser Sessions" : "No Results", systemImage: "globe.desk")
+                    } description: {
+                        Text(workspace.sessions.isEmpty
+                             ? "Sessions on this Mac and saved SSH hosts appear here automatically."
+                             : "Try a different search.")
+                    } actions: {
+                        if workspace.sessions.isEmpty {
+                            Button("Add SSH Host…") { workspace.isPresentingHostManager = true }
+                        }
                     }
                 }
             }
@@ -39,18 +45,27 @@ struct BrowserSidebar: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
-                    workspace.isPresentingSessionDiscovery = true
+                    workspace.isPresentingHostManager = true
                 } label: {
-                    Label("Discover Browser Sessions", systemImage: "plus")
+                    Label("Add SSH Host", systemImage: "plus")
                 }
                 .labelStyle(.iconOnly)
 
                 Menu {
+                    Button("Refresh Sessions") {
+                        workspace.refreshDiscoveredSessions()
+                    }
+
                     Button("Reconnect All Sessions") {
                         workspace.reconnectAll()
                     }
                     .disabled(workspace.sessions.isEmpty)
 
+                    Button("Manage SSH Hosts…") {
+                        workspace.isPresentingHostManager = true
+                    }
+
+                    Divider()
                     Button("Clear Search") {
                         workspace.searchText = ""
                     }
@@ -91,10 +106,13 @@ struct BrowserSidebar: View {
         )
         .tag(session.id)
         .contextMenu {
-            Button("Session Settings…") { workspace.edit(session) }
             Button("Reconnect") { workspace.reconnect(session) }
-            Divider()
-            Button("Remove", role: .destructive) { workspace.remove(session) }
+            if session.agentBrowserSource?.location == .ssh {
+                Divider()
+                Button("Forget SSH Host", role: .destructive) {
+                    workspace.removeSSHHost(for: session)
+                }
+            }
         }
     }
 

@@ -6,6 +6,8 @@ import SwiftUI
 @MainActor
 final class BrowserWorkspace: ObservableObject {
     @Published private(set) var sessions: [BrowserSession] = []
+    @Published private(set) var savedSSHHosts: [String] = []
+    @Published private(set) var isDiscoveringSessions = false
     @Published var selectedSessionID: BrowserSession.ID? {
         didSet {
             guard selectedSessionID != oldValue else { return }
@@ -14,8 +16,7 @@ final class BrowserWorkspace: ObservableObject {
     }
     @Published var isSidebarVisible = true
     @Published var isInspectorVisible = true
-    @Published var isPresentingSessionDiscovery = false
-    @Published var sessionBeingEdited: BrowserSession?
+    @Published var isPresentingHostManager = false
     @Published var presentedError: PresentedWorkspaceError?
     @Published private(set) var isRunningNavigationCommand = false
     @Published private var navigationCapabilities: [BrowserSession.ID: AgentBrowserNavigationCapabilities] = [:]
@@ -46,8 +47,12 @@ final class BrowserWorkspace: ObservableObject {
     private var pictureInPictureController: PictureInPictureWindowController?
     private let tunnelManager = SSHTunnelManager()
     private var terminationObserver: AnyCancellable?
-    private var runtimeStatusObserver: AnyCancellable?
-    private var isRefreshingRuntimeStatuses = false
+    private var localDiscoveryObserver: AnyCancellable?
+    private var remoteDiscoveryObserver: AnyCancellable?
+    private var discoveringTargets = Set<AgentBrowserDiscoveryTarget>()
+    private var missingDiscoveryPasses: [String: Int] = [:]
+    private var persistedSessionCache: [String: BrowserSession] = [:]
+    private var legacySessionCache: [BrowserSession] = []
     private var browserStageSize: CGSize?
     private var viewportSyncTask: Task<Void, Never>?
     private var lastRequestedViewports: [BrowserSession.ID: BrowserViewportSize] = [:]
@@ -57,10 +62,24 @@ final class BrowserWorkspace: ObservableObject {
     private let decoder = JSONDecoder()
 
     init() {
+        var persistedSessions: [BrowserSession] = []
         if let data = UserDefaults.standard.data(forKey: Keys.sessions),
            let decoded = try? decoder.decode([BrowserSession].self, from: data) {
-            sessions = decoded
+            persistedSessions = decoded
+            persistedSessionCache = Dictionary(
+                decoded.compactMap { session in
+                    session.agentBrowserSource.map { ($0.identity, session) }
+                },
+                uniquingKeysWith: { current, _ in current }
+            )
+            legacySessionCache = decoded.filter { $0.agentBrowserSource == nil }
         }
+
+        let storedHosts = UserDefaults.standard.stringArray(forKey: Keys.sshHosts) ?? []
+        savedSSHHosts = DiscoveryTargetCatalog.normalizedSSHHosts(
+            storedHosts + DiscoveryTargetCatalog.migratedSSHHosts(from: persistedSessions)
+        )
+        UserDefaults.standard.set(savedSSHHosts, forKey: Keys.sshHosts)
 
         if UserDefaults.standard.object(forKey: Keys.preferredFPS) != nil {
             preferredFPS = min(max(UserDefaults.standard.integer(forKey: Keys.preferredFPS), 0), 120)
@@ -76,11 +95,25 @@ final class BrowserWorkspace: ObservableObject {
                 tunnelManager?.stopAll()
             }
 
-        runtimeStatusObserver = Timer.publish(every: 4, on: .main, in: .common)
+        localDiscoveryObserver = Timer.publish(every: 5, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 Task { @MainActor in
-                    await self?.refreshRuntimeStatuses()
+                    await self?.refreshDiscoveredSessions(on: [.local])
+                }
+            }
+
+        remoteDiscoveryObserver = Timer.publish(every: 15, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    await self.refreshDiscoveredSessions(
+                        on: self.knownDiscoveryTargets.filter { target in
+                            if case .ssh = target { return true }
+                            return false
+                        }
+                    )
                 }
             }
     }
@@ -135,7 +168,7 @@ final class BrowserWorkspace: ObservableObject {
     }
 
     var knownDiscoveryTargets: [AgentBrowserDiscoveryTarget] {
-        DiscoveryTargetCatalog.knownTargets(from: sessions)
+        DiscoveryTargetCatalog.knownTargets(sshHosts: savedSSHHosts)
     }
 
     func client(for session: BrowserSession) -> AgentBrowserStream {
@@ -146,73 +179,55 @@ final class BrowserWorkspace: ObservableObject {
         return client
     }
 
-    func addDiscoveredSession(_ discovered: DiscoveredAgentBrowserSession) async throws {
-        if let existing = sessions.first(where: {
-            $0.agentBrowserSource?.identity == discovered.source.identity
-        }) {
-            selectedSessionID = existing.id
-            return
+    func addSSHHost(_ rawHost: String) throws {
+        let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AgentBrowserDiscoveryService.isValidSSHHost(host) else {
+            throw AgentBrowserDiscoveryError.invalidSSHHost
         }
+        guard !savedSSHHosts.contains(where: {
+            $0.caseInsensitiveCompare(host) == .orderedSame
+        }) else { return }
 
-        let id = UUID()
-        let endpoint: String
-        switch discovered.source.location {
-        case .local:
-            endpoint = "ws://127.0.0.1:\(discovered.source.streamPort)"
-        case .ssh:
-            guard let host = discovered.source.sshHost else {
-                throw AgentBrowserDiscoveryError.invalidSSHHost
-            }
-            endpoint = try await tunnelManager.open(
-                for: id,
-                host: host,
-                remotePort: discovered.source.streamPort
-            )
+        savedSSHHosts.append(host)
+        savedSSHHosts = DiscoveryTargetCatalog.normalizedSSHHosts(savedSSHHosts)
+        saveHosts()
+
+        Task { await refreshDiscoveredSessions(on: [.ssh(host)]) }
+    }
+
+    func removeSSHHost(_ host: String) {
+        savedSSHHosts.removeAll { $0.caseInsensitiveCompare(host) == .orderedSame }
+        saveHosts()
+
+        let hostSessions = sessions.filter { session in
+            guard session.agentBrowserSource?.location == .ssh,
+                  let sessionHost = session.agentBrowserSource?.sshHost else { return false }
+            return sessionHost.caseInsensitiveCompare(host) == .orderedSame
         }
-
-        let session = BrowserSession(
-            id: id,
-            endpoint: EndpointNormalizer.normalize(endpoint),
-            automaticallyConnects: true,
-            agentBrowserSource: discovered.source,
-            activePageTitle: discovered.activePageTitle,
-            activePageURL: discovered.activePageURL
-        )
-        sessions.append(session)
-        selectedSessionID = session.id
-        save()
-        connectStream(for: session)
+        for session in hostSessions {
+            removeSession(session, keepsCachedMetadata: false)
+        }
+        persistedSessionCache = persistedSessionCache.filter { _, session in
+            guard session.agentBrowserSource?.location == .ssh,
+                  let sessionHost = session.agentBrowserSource?.sshHost else { return true }
+            return sessionHost.caseInsensitiveCompare(host) != .orderedSame
+        }
+        saveSessionCache()
     }
 
-    func isDiscoveredSessionAdded(_ discovered: DiscoveredAgentBrowserSession) -> Bool {
-        sessions.contains { $0.agentBrowserSource?.identity == discovered.source.identity }
+    func removeSSHHost(for session: BrowserSession) {
+        guard let source = session.agentBrowserSource,
+              source.location == .ssh,
+              let host = source.sshHost else { return }
+        removeSSHHost(host)
     }
 
-    func edit(_ session: BrowserSession) {
-        sessionBeingEdited = session
-    }
-
-    func updateSession(
-        _ session: BrowserSession,
-        automaticallyConnects: Bool
-    ) {
-        guard let index = sessions.firstIndex(where: { $0.id == session.id }) else { return }
-        sessions[index].automaticallyConnects = automaticallyConnects
-        save()
-    }
-
-    func remove(_ session: BrowserSession) {
-        removeFromPictureInPicture(session.id)
-        clients[session.id]?.disconnect()
-        clients[session.id] = nil
-        clientStatusObservers[session.id] = nil
-        lastRequestedViewports[session.id] = nil
-        lastObservedViewports[session.id] = nil
-        tunnelManager.stop(for: session.id)
-        navigationCapabilities[session.id] = nil
-        sessions.removeAll { $0.id == session.id }
-        if selectedSessionID == session.id { selectedSessionID = nil }
-        save()
+    func sessionCount(forSSHHost host: String) -> Int {
+        sessions.count { session in
+            guard session.agentBrowserSource?.location == .ssh,
+                  let sessionHost = session.agentBrowserSource?.sshHost else { return false }
+            return sessionHost.caseInsensitiveCompare(host) == .orderedSame
+        }
     }
 
     func reconnectAll() {
@@ -223,29 +238,12 @@ final class BrowserWorkspace: ObservableObject {
         }
     }
 
-    func connectSavedSessions() async {
-        await reconcileLegacyLocalSessions()
-        let sessionIDs = sessions.filter(\.automaticallyConnects).map(\.id)
-        for id in sessionIDs {
-            do {
-                try await prepareAgentBrowserSessionIfNeeded(id)
-                guard let session = sessions.first(where: { $0.id == id }) else { continue }
-                connectStream(for: session)
-            } catch {
-                // A saved remote may be asleep or its Agent Browser session may
-                // have ended. Keep it in the list so the user can retry later.
-            }
-        }
-        await refreshRuntimeStatuses()
+    func startAutomaticDiscovery() async {
+        await refreshDiscoveredSessions(on: knownDiscoveryTargets)
     }
 
-    private func reconcileLegacyLocalSessions() async {
-        guard sessions.contains(where: { $0.unmanagedLoopbackStreamPort != nil }),
-              let discovered = try? await AgentBrowserDiscoveryService.discover(.local) else { return }
-        let reconciled = LegacySessionReconciler.reconcile(sessions, with: discovered)
-        guard reconciled != sessions else { return }
-        sessions = reconciled
-        save()
+    func refreshDiscoveredSessions() {
+        Task { await refreshDiscoveredSessions(on: knownDiscoveryTargets) }
     }
 
     func reconnectSelected() {
@@ -577,61 +575,182 @@ final class BrowserWorkspace: ObservableObject {
         }
     }
 
-    private func refreshRuntimeStatuses() async {
-        guard !isRefreshingRuntimeStatuses else { return }
-        isRefreshingRuntimeStatuses = true
-        defer { isRefreshingRuntimeStatuses = false }
+    private func refreshDiscoveredSessions(on requestedTargets: [AgentBrowserDiscoveryTarget]) async {
+        let knownTargets = Set(knownDiscoveryTargets)
+        let targets = Array(Set(requestedTargets))
+            .filter { knownTargets.contains($0) && !discoveringTargets.contains($0) }
+        guard !targets.isEmpty else { return }
 
-        let managedSessions = sessions.compactMap {
-            session -> (BrowserSession.ID, AgentBrowserSource, Bool)? in
-            guard let source = session.agentBrowserSource else { return nil }
-            return (session.id, source, session.automaticallyConnects)
-        }
+        discoveringTargets.formUnion(targets)
+        isDiscoveringSessions = true
 
-        for (id, source, automaticallyConnects) in managedSessions {
-            guard let status = try? await AgentBrowserDiscoveryService.runtimeStatus(for: source) else {
-                continue
-            }
-
-            if let index = sessions.firstIndex(where: { $0.id == id }) {
-                let identityChanged = sessions[index].activePageTitle != status.activePageTitle
-                    || sessions[index].activePageURL != status.activePageURL
-                sessions[index].activePageTitle = status.activePageTitle
-                sessions[index].activePageURL = status.activePageURL
-                if identityChanged { save() }
-            }
-
-            if let port = status.port, port != source.streamPort {
-                do {
-                    try await prepareAgentBrowserSessionIfNeeded(id)
-                    if automaticallyConnects,
-                       let refreshed = sessions.first(where: { $0.id == id }) {
-                        connectStream(for: refreshed)
+        let results = await withTaskGroup(of: TargetDiscoveryResult.self) { group in
+            for target in targets {
+                group.addTask {
+                    do {
+                        return TargetDiscoveryResult(
+                            target: target,
+                            sessions: try await AgentBrowserDiscoveryService.discover(target)
+                        )
+                    } catch {
+                        return TargetDiscoveryResult(target: target, sessions: nil)
                     }
-                } catch {
-                    continue
-                }
-            } else if automaticallyConnects,
-                      let session = sessions.first(where: { $0.id == id }) {
-                let client = client(for: session)
-                switch client.connectionState {
-                case .disconnected, .failed:
-                    let configuration = streamConfiguration(for: id)
-                    client.connect(
-                        maxFPS: configuration.maxFPS,
-                        pacing: configuration.pacing,
-                        pausesFrameDelivery: configuration.pausesFrameDelivery
-                    )
-                case .connecting, .connected:
-                    break
                 }
             }
 
-            clients[id]?.applyRuntimeStatus(status)
-            if !status.browserConnected || !status.streamingEnabled || !status.screencasting {
-                navigationCapabilities[id] = AgentBrowserNavigationCapabilities()
+            var results: [TargetDiscoveryResult] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+
+        for result in results where Set(knownDiscoveryTargets).contains(result.target) {
+            if let discovered = result.sessions {
+                await reconcileDiscoveredSessions(discovered, for: result.target)
             }
         }
+
+        discoveringTargets.subtract(targets)
+        isDiscoveringSessions = !discoveringTargets.isEmpty
+    }
+
+    private func reconcileDiscoveredSessions(
+        _ discoveredSessions: [DiscoveredAgentBrowserSession],
+        for target: AgentBrowserDiscoveryTarget
+    ) async {
+        let available = discoveredSessions
+            .filter { $0.browserConnected && $0.streamingEnabled }
+            .sorted {
+                $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending
+            }
+        let availableIdentities = Set(available.map(\.source.identity))
+
+        for discovered in available {
+            missingDiscoveryPasses[discovered.source.identity] = nil
+            try? await upsertDiscoveredSession(discovered)
+        }
+
+        let missing = sessions.filter { session in
+            guard let source = session.agentBrowserSource,
+                  source.matches(target) else { return false }
+            return !availableIdentities.contains(source.identity)
+        }
+        for session in missing {
+            guard let identity = session.agentBrowserSource?.identity else { continue }
+            let count = AutomaticSessionRetention.nextMissingPassCount(
+                previous: missingDiscoveryPasses[identity, default: 0],
+                isPresent: false
+            )
+            missingDiscoveryPasses[identity] = count
+            if AutomaticSessionRetention.shouldRemove(missingPassCount: count) {
+                missingDiscoveryPasses[identity] = nil
+                removeSession(session, keepsCachedMetadata: true)
+            }
+        }
+    }
+
+    private func upsertDiscoveredSession(_ discovered: DiscoveredAgentBrowserSession) async throws {
+        let identity = discovered.source.identity
+        if let index = sessions.firstIndex(where: {
+            $0.agentBrowserSource?.identity == identity
+        }) {
+            let existing = sessions[index]
+            let connectionChanged = existing.agentBrowserSource?.streamPort != discovered.source.streamPort
+            if connectionChanged {
+                let endpoint = try await endpoint(for: discovered.source, sessionID: existing.id)
+                resetClient(for: existing.id)
+                sessions[index].endpoint = EndpointNormalizer.normalize(endpoint)
+            }
+            sessions[index].agentBrowserSource = discovered.source
+            sessions[index].activePageTitle = discovered.activePageTitle
+            sessions[index].activePageURL = discovered.activePageURL
+            sessions[index].automaticallyConnects = true
+            save()
+
+            let session = sessions[index]
+            let stream = client(for: session)
+            switch stream.connectionState {
+            case .disconnected, .failed:
+                connectStream(for: session)
+            case .connecting, .connected:
+                break
+            }
+            stream.applyRuntimeStatus(discovered.runtimeStatus)
+            return
+        }
+
+        var session = cachedSession(for: discovered) ?? BrowserSession(
+            endpoint: "",
+            automaticallyConnects: true,
+            agentBrowserSource: discovered.source
+        )
+        session.endpoint = EndpointNormalizer.normalize(
+            try await endpoint(for: discovered.source, sessionID: session.id)
+        )
+        session.automaticallyConnects = true
+        session.agentBrowserSource = discovered.source
+        session.activePageTitle = discovered.activePageTitle
+        session.activePageURL = discovered.activePageURL
+
+        sessions.append(session)
+        save()
+        if selectedSessionID == nil { selectedSessionID = session.id }
+        connectStream(for: session)
+        client(for: session).applyRuntimeStatus(discovered.runtimeStatus)
+    }
+
+    private func cachedSession(for discovered: DiscoveredAgentBrowserSession) -> BrowserSession? {
+        if let cached = persistedSessionCache[discovered.source.identity] {
+            return cached
+        }
+        guard discovered.source.location == .local,
+              let index = legacySessionCache.firstIndex(where: {
+                  $0.unmanagedLoopbackStreamPort == discovered.source.streamPort
+              }) else { return nil }
+        return legacySessionCache.remove(at: index)
+    }
+
+    private func endpoint(for source: AgentBrowserSource, sessionID: BrowserSession.ID) async throws -> String {
+        switch source.location {
+        case .local:
+            return "ws://127.0.0.1:\(source.streamPort)"
+        case .ssh:
+            guard let host = source.sshHost else {
+                throw AgentBrowserDiscoveryError.invalidSSHHost
+            }
+            return try await tunnelManager.open(
+                for: sessionID,
+                host: host,
+                remotePort: source.streamPort
+            )
+        }
+    }
+
+    private func resetClient(for id: BrowserSession.ID) {
+        clients[id]?.disconnect()
+        clients[id] = nil
+        clientStatusObservers[id] = nil
+        lastRequestedViewports[id] = nil
+        lastObservedViewports[id] = nil
+        navigationCapabilities[id] = nil
+    }
+
+    private func removeSession(_ session: BrowserSession, keepsCachedMetadata: Bool) {
+        removeFromPictureInPicture(session.id)
+        resetClient(for: session.id)
+        tunnelManager.stop(for: session.id)
+        sessions.removeAll { $0.id == session.id }
+
+        if let identity = session.agentBrowserSource?.identity {
+            if keepsCachedMetadata {
+                persistedSessionCache[identity] = session
+            } else {
+                persistedSessionCache[identity] = nil
+            }
+        }
+        if selectedSessionID == session.id {
+            selectedSessionID = sessions.first?.id
+        }
+        saveSessionCache()
     }
 
     private func present(_ error: Error) {
@@ -639,12 +758,31 @@ final class BrowserWorkspace: ObservableObject {
     }
 
     private func save() {
-        guard let data = try? encoder.encode(sessions) else { return }
+        for session in sessions {
+            guard let identity = session.agentBrowserSource?.identity else { continue }
+            persistedSessionCache[identity] = session
+        }
+        saveSessionCache()
+    }
+
+    private func saveSessionCache() {
+        let cached = Array(persistedSessionCache.values) + legacySessionCache
+        guard let data = try? encoder.encode(cached.sorted { $0.createdAt < $1.createdAt }) else { return }
         UserDefaults.standard.set(data, forKey: Keys.sessions)
+    }
+
+    private func saveHosts() {
+        UserDefaults.standard.set(savedSSHHosts, forKey: Keys.sshHosts)
+    }
+
+    private struct TargetDiscoveryResult {
+        let target: AgentBrowserDiscoveryTarget
+        let sessions: [DiscoveredAgentBrowserSession]?
     }
 
     private enum Keys {
         static let sessions = "browserSessions.v1"
+        static let sshHosts = "sshHosts.v1"
         static let preferredFPS = "preferredFPS"
         static let pacing = "streamPacing"
     }

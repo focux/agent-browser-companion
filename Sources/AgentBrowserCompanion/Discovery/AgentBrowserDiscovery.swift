@@ -46,6 +46,17 @@ struct DiscoveredAgentBrowserSession: Identifiable, Hashable {
         guard displayTitle != source.sessionName else { return endpoint }
         return "\(source.sessionName) · \(endpoint)"
     }
+
+    var runtimeStatus: AgentBrowserRuntimeStatus {
+        AgentBrowserRuntimeStatus(
+            browserConnected: browserConnected,
+            streamingEnabled: streamingEnabled,
+            screencasting: screencasting,
+            port: source.streamPort,
+            activePageTitle: activePageTitle,
+            activePageURL: activePageURL
+        )
+    }
 }
 
 struct AgentBrowserRuntimeStatus: Equatable {
@@ -96,12 +107,11 @@ enum AgentBrowserDiscoveryTarget: Hashable {
 }
 
 enum DiscoveryTargetCatalog {
-    static func knownTargets(from sessions: [BrowserSession]) -> [AgentBrowserDiscoveryTarget] {
+    static func knownTargets(sshHosts: [String]) -> [AgentBrowserDiscoveryTarget] {
         var seenHosts = Set<String>()
-        let remoteTargets = sessions.compactMap { session -> AgentBrowserDiscoveryTarget? in
-            guard session.agentBrowserSource?.location == .ssh,
-                  let rawHost = session.agentBrowserSource?.sshHost?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
+        let remoteTargets = sshHosts.compactMap { host -> AgentBrowserDiscoveryTarget? in
+            let rawHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard
                   AgentBrowserDiscoveryService.isValidSSHHost(rawHost),
                   seenHosts.insert(rawHost.lowercased()).inserted else { return nil }
             return .ssh(rawHost)
@@ -109,6 +119,24 @@ enum DiscoveryTargetCatalog {
         .sorted { $0.displayHost.localizedCaseInsensitiveCompare($1.displayHost) == .orderedAscending }
 
         return [.local] + remoteTargets
+    }
+
+    static func migratedSSHHosts(from sessions: [BrowserSession]) -> [String] {
+        knownTargets(sshHosts: sessions.compactMap { session in
+            guard session.agentBrowserSource?.location == .ssh else { return nil }
+            return session.agentBrowserSource?.sshHost
+        })
+        .compactMap { target in
+            guard case .ssh(let host) = target else { return nil }
+            return host
+        }
+    }
+
+    static func normalizedSSHHosts(_ hosts: [String]) -> [String] {
+        knownTargets(sshHosts: hosts).compactMap { target in
+            guard case .ssh(let host) = target else { return nil }
+            return host
+        }
     }
 }
 
@@ -321,44 +349,45 @@ struct AgentBrowserDiscoveryService {
                 throw AgentBrowserDiscoveryError.commandFailed(list.error ?? "Agent Browser session discovery failed.")
             }
 
-            return try sessionNames.map { sessionName in
-                let statusOutput = try runAgentBrowser(
-                    arguments: ["--session", sessionName, "stream", "status", "--json"],
-                    target: target
-                )
-                let response: Response<StreamStatusResponse> = try decodeResponse(statusOutput)
-                guard response.success, let status = response.data else {
-                    throw AgentBrowserDiscoveryError.commandFailed(
-                        response.error ?? "Could not read the stream status for \(sessionName)."
+            return sessionNames.compactMap { sessionName in
+                do {
+                    let statusOutput = try runAgentBrowser(
+                        arguments: ["--session", sessionName, "stream", "status", "--json"],
+                        target: target
                     )
-                }
-                guard let port = status.port else {
-                    throw AgentBrowserDiscoveryError.missingStreamPort(sessionName)
-                }
+                    let response: Response<StreamStatusResponse> = try decodeResponse(statusOutput)
+                    guard response.success, let status = response.data, let port = status.port else {
+                        return nil
+                    }
 
-                let source: AgentBrowserSource
-                switch target {
-                case .local:
-                    source = .local(sessionName: sessionName, streamPort: port)
-                case .ssh(let host):
-                    source = .ssh(host: host, sessionName: sessionName, streamPort: port)
+                    let source: AgentBrowserSource
+                    switch target {
+                    case .local:
+                        source = .local(sessionName: sessionName, streamPort: port)
+                    case .ssh(let host):
+                        source = .ssh(host: host, sessionName: sessionName, streamPort: port)
+                    }
+                    let tabsOutput = try? runAgentBrowser(
+                        arguments: ["--session", sessionName, "tab", "list", "--json"],
+                        target: target
+                    )
+                    let tabsResponse: Response<TabListResponse>? = tabsOutput.flatMap {
+                        try? decodeResponse($0)
+                    }
+                    let activeTab = tabsResponse?.data?.tabs.first(where: \.active)
+                    return DiscoveredAgentBrowserSession(
+                        source: source,
+                        browserConnected: status.connected,
+                        streamingEnabled: status.enabled,
+                        screencasting: status.screencasting,
+                        activePageTitle: activeTab?.title,
+                        activePageURL: activeTab.flatMap { URL(string: $0.url) }
+                    )
+                } catch {
+                    // A stale or partially initialized session should not hide
+                    // healthy sessions discovered on the same host.
+                    return nil
                 }
-                let tabsOutput = try? runAgentBrowser(
-                    arguments: ["--session", sessionName, "tab", "list", "--json"],
-                    target: target
-                )
-                let tabsResponse: Response<TabListResponse>? = tabsOutput.flatMap {
-                    try? decodeResponse($0)
-                }
-                let activeTab = tabsResponse?.data?.tabs.first(where: \.active)
-                return DiscoveredAgentBrowserSession(
-                    source: source,
-                    browserConnected: status.connected,
-                    streamingEnabled: status.enabled,
-                    screencasting: status.screencasting,
-                    activePageTitle: activeTab?.title,
-                    activePageURL: activeTab.flatMap { URL(string: $0.url) }
-                )
             }
         }.value
     }

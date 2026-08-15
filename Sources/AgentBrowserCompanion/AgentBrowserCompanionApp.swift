@@ -10,7 +10,7 @@ struct AgentBrowserCompanionApp: App {
                 .environmentObject(workspace)
                 .frame(minWidth: 960, minHeight: 620)
                 .task {
-                    await workspace.connectSavedSessions()
+                    await workspace.startAutomaticDiscovery()
                 }
         }
         .windowStyle(.automatic)
@@ -32,8 +32,8 @@ private struct CompanionCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Add Browser Sessions…") {
-                workspace.isPresentingSessionDiscovery = true
+            Button("Add SSH Host…") {
+                workspace.isPresentingHostManager = true
             }
             .keyboardShortcut("n", modifiers: [.command])
         }

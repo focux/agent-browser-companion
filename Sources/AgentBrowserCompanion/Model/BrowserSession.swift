@@ -99,6 +99,18 @@ enum LegacySessionReconciler {
     }
 }
 
+enum AutomaticSessionRetention {
+    static let missingPassLimit = 2
+
+    static func nextMissingPassCount(previous: Int, isPresent: Bool) -> Int {
+        isPresent ? 0 : previous + 1
+    }
+
+    static func shouldRemove(missingPassCount: Int) -> Bool {
+        missingPassCount >= missingPassLimit
+    }
+}
+
 struct AgentBrowserSource: Codable, Hashable {
     enum Location: String, Codable {
         case local
@@ -132,6 +144,18 @@ struct AgentBrowserSource: Codable, Hashable {
 
     var identity: String {
         "\(location.rawValue)|\(sshHost ?? "")|\(sessionName)"
+    }
+
+    func matches(_ target: AgentBrowserDiscoveryTarget) -> Bool {
+        switch (location, target) {
+        case (.local, .local):
+            return true
+        case (.ssh, .ssh(let host)):
+            guard let sshHost else { return false }
+            return sshHost.caseInsensitiveCompare(host) == .orderedSame
+        default:
+            return false
+        }
     }
 }
 

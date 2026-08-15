@@ -40,7 +40,7 @@ The app discovers active [Agent Browser](https://github.com/vercel-labs/agent-br
 
 - **Human handoff** — directly take over a cloud or sandboxed agent's existing browser for login, MFA, verification, consent, and other human-only steps.
 - **Observe agent work** — follow browser activity live while the agent works on another machine, then intervene only when needed.
-- **Local and remote discovery** — find sessions on this Mac and previously connected SSH hosts in one place.
+- **Automatic local and remote discovery** — active sessions on this Mac and saved SSH hosts appear and disappear automatically.
 - **Tailscale-friendly** — connect through a MagicDNS hostname, Tailscale IP, or SSH config alias without exposing the browser stream publicly.
 - **Multiple live browsers** — keep several sessions available and switch between them instantly.
 - **Native controls** — Back, Forward, Reload, URL context, connection health, and stream settings use standard macOS components.
@@ -64,14 +64,13 @@ Liquid Glass is available automatically on macOS 26. Earlier supported macOS rel
    AGENT_BROWSER_STREAM_PORT=9223 agent-browser open https://example.com
    ```
 
-2. Open Agent Browser Companion and press `⌘N`.
-3. Choose the session under **Known Hosts**, then click **Add Session**.
+2. Open Agent Browser Companion. The active local session appears in the sidebar automatically.
 
-The app remembers imported sessions, reconnects them on launch, and searches their SSH hosts automatically the next time you open Add Sessions.
+The app continuously reconciles the sidebar with active, stream-enabled Agent Browser sessions. Closed sessions disappear automatically, while temporary discovery failures receive a short grace period so brief network interruptions do not make the interface flicker.
 
 ## Remote sessions over SSH
 
-Choose **Add Sessions → New SSH Host** and enter a hostname, `user@host`, or alias from `~/.ssh/config`. The app runs Agent Browser discovery through OpenSSH and creates a loopback-only tunnel for every imported stream.
+Press `⌘N` or choose **Add Host**, then enter a hostname, `user@host`, or alias from `~/.ssh/config`. The app remembers the host, discovers its active sessions through OpenSSH, and creates a loopback-only tunnel for every available stream. You add the machine once; sessions subsequently appear and disappear without manual importing.
 
 Authentication stays with OpenSSH, your SSH agent, macOS Keychain, and `~/.ssh/config`; the app does not request or store server passwords. Put options such as `User`, `Port`, `IdentityFile`, and `ProxyJump` in your SSH config:
 
@@ -99,7 +98,7 @@ Agent Browser Companion uses Agent Browser's streaming protocol rather than expo
 - sends `config` with acknowledgement pacing and the selected frame-rate limit;
 - acknowledges frames after the Metal command buffer completes;
 - sends `input_mouse`, `input_keyboard`, and `input_touch` events;
-- uses Agent Browser commands for discovery, runtime health, navigation, and viewport updates;
+- uses Agent Browser commands for continuous discovery, runtime health, navigation, and viewport updates;
 - ignores unknown ordered events so newer protocol additions do not break the stream.
 
 Remote sessions use the same protocol through managed local SSH port forwards. Tunnels are recreated automatically when the app reconnects.

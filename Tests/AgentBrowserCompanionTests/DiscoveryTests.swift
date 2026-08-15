@@ -3,7 +3,7 @@ import XCTest
 
 final class DiscoveryTests: XCTestCase {
     func testKnownDiscoveryTargetsAlwaysIncludesLocal() {
-        XCTAssertEqual(DiscoveryTargetCatalog.knownTargets(from: []), [.local])
+        XCTAssertEqual(DiscoveryTargetCatalog.knownTargets(sshHosts: []), [.local])
     }
 
     func testLocalCommandEnvironmentFindsAgentBrowserInstalledByNVM() throws {
@@ -144,10 +144,42 @@ final class DiscoveryTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            DiscoveryTargetCatalog.knownTargets(from: sessions),
+            DiscoveryTargetCatalog.knownTargets(
+                sshHosts: DiscoveryTargetCatalog.migratedSSHHosts(from: sessions)
+            ),
             [.local, .ssh("developer@browser.example.com"), .ssh("build-server")]
         )
         XCTAssertEqual(AgentBrowserDiscoveryTarget.ssh("developer@browser.example.com").displayHost, "browser.example.com")
+    }
+
+    func testSavedSSHHostsAreNormalizedAndDeduplicated() {
+        XCTAssertEqual(
+            DiscoveryTargetCatalog.normalizedSSHHosts([
+                " build-server ",
+                "BUILD-SERVER",
+                "developer@browser.example.com",
+                "-oProxyCommand=bad",
+            ]),
+            ["developer@browser.example.com", "build-server"]
+        )
+    }
+
+    func testAutomaticSessionsRequireTwoMissingDiscoveryPassesBeforeRemoval() {
+        let first = AutomaticSessionRetention.nextMissingPassCount(
+            previous: 0,
+            isPresent: false
+        )
+        XCTAssertFalse(AutomaticSessionRetention.shouldRemove(missingPassCount: first))
+
+        let second = AutomaticSessionRetention.nextMissingPassCount(
+            previous: first,
+            isPresent: false
+        )
+        XCTAssertTrue(AutomaticSessionRetention.shouldRemove(missingPassCount: second))
+        XCTAssertEqual(
+            AutomaticSessionRetention.nextMissingPassCount(previous: second, isPresent: true),
+            0
+        )
     }
 
     func testExistingPersistedSessionDecodesWithoutDiscoveryMetadata() throws {

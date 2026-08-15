@@ -285,7 +285,7 @@ private struct SelectionPlaceholder: View {
                 .font(.title3.weight(.semibold))
             Text(hasSessions
                  ? "Choose a session in the sidebar to view and control its browser."
-                 : "Browser sessions you add in the sidebar will appear here.")
+                 : "Active sessions on this Mac and saved SSH hosts will appear here.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)

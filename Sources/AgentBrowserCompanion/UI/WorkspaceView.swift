@@ -21,11 +21,8 @@ struct WorkspaceView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .modifier(SeamlessWindowToolbar())
-        .sheet(isPresented: $workspace.isPresentingSessionDiscovery) {
-            SessionDiscoverySheet()
-        }
-        .sheet(item: $workspace.sessionBeingEdited) { session in
-            SessionEditorSheet(session: session)
+        .sheet(isPresented: $workspace.isPresentingHostManager) {
+            HostManagementSheet()
         }
         .alert("Agent Browser Companion", isPresented: Binding(
             get: { workspace.presentedError != nil },

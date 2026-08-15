@@ -23,12 +23,6 @@ struct BrowserInspector: View {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Menu {
                         Button {
-                            workspace.edit(session)
-                        } label: {
-                            Label("Session Settings…", systemImage: "gearshape")
-                        }
-
-                        Button {
                             workspace.reconnect(session)
                         } label: {
                             Label("Reconnect Stream", systemImage: "antenna.radiowaves.left.and.right")
@@ -41,12 +35,14 @@ struct BrowserInspector: View {
                             Label("Copy Endpoint", systemImage: "doc.on.doc")
                         }
 
-                        Divider()
+                        if session.agentBrowserSource?.location == .ssh {
+                            Divider()
 
-                        Button(role: .destructive) {
-                            workspace.remove(session)
-                        } label: {
-                            Label("Remove Browser Session", systemImage: "trash")
+                            Button(role: .destructive) {
+                                workspace.removeSSHHost(for: session)
+                            } label: {
+                                Label("Forget SSH Host", systemImage: "trash")
+                            }
                         }
                     } label: {
                         Label("Session Actions", systemImage: "ellipsis")
