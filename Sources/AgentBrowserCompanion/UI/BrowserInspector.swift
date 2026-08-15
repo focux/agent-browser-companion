@@ -8,6 +8,7 @@ struct BrowserInspector: View {
         Group {
             if let session = workspace.selectedSession {
                 InspectorContent(session: session, client: workspace.client(for: session))
+                    .id(session.id)
             } else {
                 ContentUnavailableView("No Browser Selected", systemImage: "sidebar.right")
             }
@@ -91,6 +92,13 @@ private struct InspectorContent: View {
                     Label("Endpoint", systemImage: "network")
                 }
                 LabeledContent {
+                    Text(latencyLabel)
+                        .monospacedDigit()
+                } label: {
+                    Label("Latency", systemImage: "timer")
+                }
+                .help("WebSocket round-trip time to the Agent Browser stream.")
+                LabeledContent {
                     Text(viewportLabel)
                         .monospacedDigit()
                 } label: {
@@ -138,6 +146,12 @@ private struct InspectorContent: View {
     private var viewportLabel: String {
         guard client.streamStatus.viewportWidth > 0 else { return "—" }
         return "\(client.streamStatus.viewportWidth) × \(client.streamStatus.viewportHeight)"
+    }
+
+    private var latencyLabel: String {
+        guard let latency = client.roundTripLatency else { return "—" }
+        let milliseconds = latency * 1_000
+        return milliseconds < 1 ? "<1 ms" : "\(Int(milliseconds.rounded())) ms"
     }
 
     private func formatFrameAge(_ age: TimeInterval) -> String {

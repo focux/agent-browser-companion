@@ -12,6 +12,7 @@ final class AgentBrowserStream: ObservableObject, Identifiable {
     @Published private(set) var currentFrame: BrowserFrame?
     @Published private(set) var frameAge: TimeInterval?
     @Published private(set) var framesPerSecond: Double = 0
+    @Published private(set) var roundTripLatency: TimeInterval?
     @Published private(set) var lastEventDescription: String?
     @Published private(set) var pageURL: URL?
     @Published private(set) var supportsClientStreamConfiguration = false
@@ -32,6 +33,8 @@ final class AgentBrowserStream: ObservableObject, Identifiable {
     private var usesLegacyFrameProtocol = false
     private var connectionGeneration = 0
     private var lastFrameReceivedAt: Date?
+    private var lastLatencyProbeAt: TimeInterval = 0
+    private var isLatencyProbeInFlight = false
     private var metricsTimer: AnyCancellable?
 
     init(session: BrowserSession) {
@@ -276,6 +279,30 @@ final class AgentBrowserStream: ObservableObject, Identifiable {
         socket?.send(.string(text)) { _ in }
     }
 
+    private func measureRoundTripLatency(startedAt: TimeInterval) {
+        guard connectionState == .connected,
+              let socket,
+              !isLatencyProbeInFlight else { return }
+        let generation = connectionGeneration
+        isLatencyProbeInFlight = true
+        lastLatencyProbeAt = startedAt
+        socket.sendPing { [weak self] error in
+            let elapsed = max(
+                ProcessInfo.processInfo.systemUptime - startedAt,
+                0
+            )
+            Task { @MainActor in
+                guard let self, generation == self.connectionGeneration else { return }
+                self.isLatencyProbeInFlight = false
+                guard error == nil else {
+                    self.roundTripLatency = nil
+                    return
+                }
+                self.roundTripLatency = elapsed
+            }
+        }
+    }
+
     private func handle(_ message: ParsedStreamMessage?) {
         guard let message else { return }
         switch message {
@@ -347,7 +374,10 @@ final class AgentBrowserStream: ObservableObject, Identifiable {
         currentFrame = nil
         frameAge = nil
         framesPerSecond = 0
+        roundTripLatency = nil
         frameTimes.removeAll()
+        isLatencyProbeInFlight = false
+        lastLatencyProbeAt = 0
         reconnectAttempt += 1
         let delay = min(pow(2, Double(reconnectAttempt)), 12)
         Task { [weak self] in
@@ -368,7 +398,10 @@ final class AgentBrowserStream: ObservableObject, Identifiable {
         currentFrame = nil
         frameAge = nil
         framesPerSecond = 0
+        roundTripLatency = nil
         lastFrameReceivedAt = nil
+        lastLatencyProbeAt = 0
+        isLatencyProbeInFlight = false
         lastEventDescription = nil
         pageURL = nil
         supportsClientStreamConfiguration = session.agentBrowserSource != nil
@@ -386,6 +419,11 @@ final class AgentBrowserStream: ObservableObject, Identifiable {
         framesPerSecond = Double(frameTimes.count)
         if let lastFrameReceivedAt {
             frameAge = Date().timeIntervalSince(lastFrameReceivedAt)
+        }
+        if connectionState == .connected,
+           !isLatencyProbeInFlight,
+           now - lastLatencyProbeAt >= 2 {
+            measureRoundTripLatency(startedAt: now)
         }
     }
 }
