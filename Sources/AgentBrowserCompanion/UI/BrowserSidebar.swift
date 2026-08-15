@@ -110,23 +110,19 @@ private struct BrowserRow: View {
         HStack(spacing: 8) {
             SiteFavicon(pageURL: client.pageURL, fallbackColor: .secondary)
                 .frame(width: iconSize, height: iconSize)
+                .saturation(isBrowserAvailable ? 1 : 0)
+                .opacity(rowContentOpacity)
 
             Text(session.displayTitle)
                 .font(.callout)
                 .lineLimit(1)
+                .opacity(rowContentOpacity)
 
             Spacer(minLength: 4)
 
-            if let port = session.portLabel {
-                Text(port)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+            statusIndicator
         }
         .padding(.vertical, 1)
-        .saturation(isBrowserAvailable ? 1 : 0)
-        .opacity(rowContentOpacity)
         .contentShape(Rectangle())
         .background {
             NativeSidebarRowHover(onHoverChanged: onHoverChanged)
@@ -135,6 +131,22 @@ private struct BrowserRow: View {
 
     private var isBrowserAvailable: Bool {
         client.isBrowserAvailable
+    }
+
+    @ViewBuilder
+    private var statusIndicator: some View {
+        if isBrowserAvailable {
+            Image(systemName: "circle.fill")
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .systemGreen))
+                .accessibilityLabel("Live")
+        } else if client.connectionState == .connecting {
+            Image(systemName: "circle.fill")
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .symbolEffect(.pulse, isActive: true)
+                .accessibilityLabel("Connecting")
+        }
     }
 
     private var rowContentOpacity: Double {
